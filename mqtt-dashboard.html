@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <title>PROJECT DASHBOARD</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- MQTT.js -->
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <!-- SheetJS để export Excel -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <style>
+    :root { --line:#e5e7eb; --muted:#6b7280; }
+    body { font-family: Arial, Helvetica, sans-serif; margin: 0; color:#111; }
+    header { display:flex; align-items:center; gap:10px; padding:14px 18px; border-bottom:1px solid var(--line); }
+    header h1 { margin:0; font-size:20px; }
+    .wrap { padding:16px 18px; display:grid; grid-template-columns: 360px 1fr; gap:16px; }
+    .card { border:1px solid var(--line); border-radius:12px; padding:14px; background:#fff; }
+    .row { display:flex; gap:8px; }
+    .row > * { flex:1; }
+    label { display:block; font-size:12px; color:var(--muted); margin-bottom:6px; }
+    input, textarea, select { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:8px; font-size:14px; }
+    button { padding:10px 12px; border:1px solid var(--line); background:#111; color:#fff; border-radius:10px; cursor:pointer; }
+    button.secondary { background:#fff; color:#111; }
+    .status { font-weight:600; }
+    .status.ok { color:#16a34a; }
+    .status.bad { color:#dc2626; }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th, td { border-bottom:1px solid var(--line); padding:8px; text-align:left; vertical-align:top; }
+    #log { height:160px; overflow:auto; background:#fafafa; border:1px solid var(--line); border-radius:8px; padding:8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <span style="font-size:20px">📊</span>
+    <h1>PROJECT DASHBOARD</h1>
+    <div style="margin-left:auto">Status: <span id="status" class="status bad">Disconnected</span></div>
+  </header>
+
+  <div class="wrap">
+    <!-- LEFT PANEL -->
+    <div class="card">
+      <h3>Connection</h3>
+      <label>Broker WebSocket URL</label>
+      <input id="brokerUrl" placeholder="wss://test.mosquitto.org:8081/mqtt" />
+      <div class="row">
+        <div>
+          <label>Username</label>
+          <input id="username" placeholder="username" />
+        </div>
+        <div>
+          <label>Password</label>
+          <input id="password" type="password" placeholder="password" />
+        </div>
+      </div>
+      <label>Subscribe Topic</label>
+      <input id="topic" placeholder="vd: test/topic/#" />
+      <div class="row" style="margin-top:10px">
+        <button id="btnConnect">Connect</button>
+        <button id="btnDisconnect" class="secondary">Disconnect</button>
+      </div>
+
+      <h3 style="margin-top:18px">Export</h3>
+      <div class="row">
+        <button id="btnExportXlsx">Export Excel</button>
+        <button id="btnExportCsv" class="secondary">Export CSV</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="btnClearData" class="secondary">Clear Data</button>
+        <span id="countLabel" style="align-self:center; color:#666">0 rows</span>
+      </div>
+
+      <h3 style="margin-top:18px">Console</h3>
+      <div id="log"></div>
+    </div>
+
+    <!-- RIGHT PANEL -->
+    <div class="card">
+      <h3>Latest Messages</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>time</th>
+            <th>topic</th>
+            <th>rpm</th>
+            <th>force</th>
+            <th>sound</th>
+            <th>vibration</th>
+          </tr>
+        </thead>
+        <tbody id="msgTableBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    const el = id => document.getElementById(id);
+    const logBox = el("log"), statusEl = el("status"), tableBody = el("msgTableBody"), countLabel = el("countLabel");
+
+    const STORAGE_KEY = "project_dashboard_data";
+    let rows = [];
+
+    // Khôi phục dữ liệu khi mở lại tab
+    window.addEventListener("load", () => {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        try {
+          rows = JSON.parse(saved) || [];
+          rows.forEach(r => addRowToTable(r));
+          countLabel.textContent = `${rows.length} rows`;
+          log(`Restored ${rows.length} rows from localStorage`);
+        } catch { rows = []; }
+      }
+    });
+
+    function log(msg){
+      const t=new Date().toLocaleTimeString();
+      logBox.textContent+=`[${t}] ${msg}\n`;
+      logBox.scrollTop=logBox.scrollHeight;
+    }
+    function setStatus(ok,txt){
+      statusEl.textContent=txt||(ok?"Connected":"Disconnected");
+      statusEl.className="status "+(ok?"ok":"bad");
+    }
+
+    function saveData() {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(rows));
+      } catch (e) {
+        if (e.name === "QuotaExceededError" || e.code === 22) {
+          alert("⚠️ Bộ nhớ đã đầy!\nHãy xuất dữ liệu ra Excel trước khi tiếp tục.\nSau khi bạn ấn OK, dữ liệu sẽ được xóa để giải phóng bộ nhớ.");
+          exportXLSX();
+          clearData();
+        }
+      }
+    }
+
+    function addRow(obj){
+      rows.push(obj);
+      countLabel.textContent = `${rows.length} rows`;
+      addRowToTable(obj);
+      saveData();
+    }
+
+    function addRowToTable(obj){
+      const tr=document.createElement("tr");
+      tr.innerHTML=`
+        <td>${obj.time}</td>
+        <td>${obj.topic}</td>
+        <td>${obj.rpm ?? ""}</td>
+        <td>${obj.force ?? ""}</td>
+        <td>${obj.sound ?? ""}</td>
+        <td>${obj.vibration ?? ""}</td>`;
+      tableBody.prepend(tr);
+      if(tableBody.children.length>200) tableBody.removeChild(tableBody.lastChild);
+    }
+
+    function clearData(){
+      rows=[]; tableBody.innerHTML=""; countLabel.textContent="0 rows";
+      localStorage.removeItem(STORAGE_KEY);
+      log("Data cleared");
+    }
+
+    // MQTT
+    let client=null;
+    function connect(){
+      const url=el("brokerUrl").value.trim(), topic=el("topic").value.trim();
+      const username=el("username").value.trim(), password=el("password").value;
+      if(!url||!topic){alert("Broker URL & Topic required");return;}
+      if(client) try{client.end(true);}catch{}
+      const opts={clientId:"web-"+Math.random().toString(16).slice(2),clean:true};
+      if(username) opts.username=username; if(password) opts.password=password;
+      client=mqtt.connect(url,opts);
+      log("Connecting...");
+      client.on("connect",()=>{
+        setStatus(true,"Connected");
+        log("Connected ✓");
+        client.subscribe(topic,err=>{
+          if(err) log("Subscribe error:"+err);
+          else log("Subscribed:"+topic);
+        });
+      });
+      client.on("message",(topic,msg)=>{
+        const text=msg.toString();
+        let data={time:new Date().toISOString(),topic};
+        try{
+          const js=JSON.parse(text);
+          if(js&&typeof js==="object"){
+            data.rpm=js.rpm;
+            data.force=js.force;
+            data.sound=js.sound;
+            data.vibration=js.vibration;
+          }
+        }catch{}
+        addRow(data);
+        log("Message ✓ on "+topic);
+      });
+      client.on("close",()=>{setStatus(false,"Disconnected");log("Closed");});
+      client.on("error",e=>{setStatus(false,"Error");log("Error:"+e.message);});
+    }
+    function disconnect(){if(client){client.end(true);}setStatus(false,"Disconnected");log("Disconnected.");}
+
+    // Export
+    function exportCSV(){
+      if(rows.length===0){alert("No data");return;}
+      const headers=["time","topic","rpm","force","sound","vibration"];
+      const csv=[headers.join(",")];
+      rows.forEach(r=>{csv.push(headers.map(h=>r[h]??"").join(","));});
+      const blob=new Blob([csv.join("\n")],{type:"text/csv"});
+      const a=document.createElement("a");
+      a.href=URL.createObjectURL(blob);a.download="project_data.csv";a.click();
+    }
+    function exportXLSX(){
+      if(rows.length===0){alert("No data");return;}
+      const ws=XLSX.utils.json_to_sheet(rows);
+      const wb=XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb,ws,"data");
+      XLSX.writeFile(wb,"project_data.xlsx");
+    }
+
+    // Bind
+    el("btnConnect").onclick=connect;
+    el("btnDisconnect").onclick=disconnect;
+    el("btnClearData").onclick=clearData;
+    el("btnExportCsv").onclick=exportCSV;
+    el("btnExportXlsx").onclick=exportXLSX;
+  </script>
+</body>
+</html>
